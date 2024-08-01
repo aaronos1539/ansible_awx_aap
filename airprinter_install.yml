@@ -92,7 +92,6 @@
       - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port ssh"
       - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port 631"
       - sudo ufw --force enable
-      #- "ufw allow from {{ awx_controller_ip }} to any port ssh"
 
     - name: Unconditionally reboot the machine with all defaults
       reboot:
