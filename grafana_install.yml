@@ -97,8 +97,8 @@
           [server]
           http_addr =
           http_port = 3000
-          domain = home.lan
-          root_url = https://grafana.home.lan:3000
+          domain = example.com
+          root_url = https://grafana.example.com:3000
           cert_key = /etc/grafana/grafana.key
           cert_file = /etc/grafana/grafana.crt
           enforce_domain = False
