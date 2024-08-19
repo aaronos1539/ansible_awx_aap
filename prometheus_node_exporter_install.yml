@@ -1,0 +1,82 @@
+---
+- hosts: all
+  become: yes
+  become_user: root
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ipaddr_network: "{{ ansible_facts.default_ipv4.network }}"
+    ipaddr_prefix: "{{ ansible_facts.default_ipv4.prefix }}"
+    prometheus_node_exporter_password_var: "{{ prometheus_node_exporter_pass_awx_survey_var }}"
+    
+  tasks:
+    - name: Installing prometheus-node-exporter
+      package:
+        name:
+          - prometheus-node-exporter
+
+    ## Begin - Setup TLS for Node Exporter #################################################################
+    - name: Create /etc/prometheus_node_exporter if it does not exist
+      ansible.builtin.file:
+        path: /etc/prometheus_node_exporter
+        state: directory
+        mode: '0755'
+    
+    - name: Create SSL Key for Node Exporter
+      community.crypto.openssl_privatekey:
+        path: /etc/prometheus_node_exporter/node_exporter.key
+
+    - name: Create simple self-signed certificate for Node Exporter
+      community.crypto.x509_certificate:
+        path: /etc/prometheus_node_exporter/node_exporter.crt
+        privatekey_path: /etc/prometheus_node_exporter/node_exporter.key
+        provider: selfsigned
+
+    - name: Change file ownership, group and permissions of Crt and Key for Node Exporter
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: prometheus
+        group: prometheus
+        mode: '0400'
+      with_items:
+      - "/etc/prometheus_node_exporter/node_exporter.key"
+      - "/etc/prometheus_node_exporter/node_exporter.crt"
+
+    - name: Installing apache2-utils to install the commnd htpasswd
+      package:
+        name:
+          - apache2-utils
+
+    - name: Create the encrypted Node Exporter password
+      ansible.builtin.shell: 
+        cmd: "htpasswd -nbB '' {{ prometheus_node_exporter_password_var }} | tr -d ':'"
+      register: htpasswd_output_2
+      no_log: True
+
+    - name: Create the configuration file /etc/prometheus_node_exporter/configuration.yml 
+      copy:
+        dest: /etc/prometheus_node_exporter/configuration.yml
+        content: |
+          tls_server_config:
+            cert_file: /etc/prometheus_node_exporter/node_exporter.crt
+            key_file: /etc/prometheus_node_exporter/node_exporter.key
+          basic_auth_users:
+            prometheus: {{ htpasswd_output_2.stdout }}
+      no_log: True
+
+    - name: Add the ARGs to /etc/default/prometheus-node-exporter
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: ARGS="--web.config=/etc/prometheus_node_exporter/configuration.yml"
+    ## End - Setup TLS for Node Exporter ###################################################################
+
+    - name: Restart prometheus-node-exporter service
+      ansible.builtin.service:
+        name: prometheus-node-exporter
+        state: restarted
+
+    - name: Setting firewall to allow port 9100
+      command:
+        cmd: "{{ item }}"
+      with_items:
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port 9100"
