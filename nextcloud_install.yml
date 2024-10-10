@@ -1,13 +1,13 @@
-## Using Ubuntu 24.04 LTS
 ---
-- hosts: nextcloud.example.com
+- hosts: testserver.example.com
   become: yes
   vars:
     nextcloud_admin_user: "{{ nextcloud_admin_user_awx_survey_var }}"
     nextcloud_admin_pass: "{{ nextcloud_admin_pass_awx_survey_var }}"
     nextcloud_db_user: "{{ nextcloud_db_user_awx_survey_var }}"
     nextcloud_db_pass: "{{ nextcloud_db_pass_awx_survey_var }}"
-    nextcloud_version: "https://download.nextcloud.com/server/releases/nextcloud-29.0.1.tar.bz2"    
+    nextcloud_version: "https://download.nextcloud.com/server/releases/nextcloud-29.0.1.tar.bz2"
+    #nextcloud_version: "https://download.nextcloud.com/server/releases/nextcloud-28.0.4.tar.bz2"
     server_time_zone: "America/Denver"
     #Facts from Ansible gathering information
     ipaddr_address: "{{ ansible_facts.default_ipv4.address }}"
@@ -15,6 +15,70 @@
     ipaddr_prefix: "{{ ansible_facts.default_ipv4.prefix }}"
     
   tasks:
+#    ####  WARNING == BEGIN - RUNNING THIS STEP WILL ERASE ALL DATA ON THE DRIVE - == BEGIN  ####
+#    ############## Begin - Setup separate drive with a new partiion for Nextcloud data ##############
+#    ############## Skip this section and go to Part 2 if the Drive already has data that you do NOT want to erase ##############
+##      
+#      #### Part 1
+#      #### Skip Part 1 and go to Part 2 if Drive has data that you do NOT want to erase
+##    
+#      # echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+#    - name: Scan the scsi_host for the new drive
+#      shell: echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+##
+#      # sudo parted --script /dev/sdb mklabel gpt mkpart primary '0%' '100%'
+#    - name: Create a new ext4 primary partition
+#      community.general.parted:
+#        device: /dev/sdb
+#        number: 1
+#        state: present
+#        fs_type: ext4
+##
+#      # sudo mkfs.ext4 /dev/sdb1
+#    - name: Create a ext4 filesystem on /dev/sdb1
+#      community.general.filesystem:
+#        fstype: ext4
+#        dev: /dev/sdb1
+#    ############## End - Setup separate drive with a new partiion for Nextcloud data ################
+#    ####  WARNING == END - RUNNING THIS STEP WILL ERASE ALL DATA ON THE DRIVE - == END  ####
+
+
+#    ############## Begin - Mount the New or Existing drive ##############
+#    ############## Start with this section if the drive already has data on the drive and you do NOT want to erase the drive ##############
+##      
+#      #### Part 2
+##
+#      # echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+#    - name: Scan the scsi_host for the new drive
+#      shell: echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+##
+#      # sudo mkdir -p /opt/nextcloud
+#      # chown -R www-data:www-data /opt/nextcloud
+#    - name: Create the /opt/nextcloud folder
+#      ansible.builtin.file:
+#        path: /opt/nextcloud
+#        state: directory
+#        recurse: yes
+#        owner: www-data
+#        group: www-data
+##
+#      # echo '/dev/sdb1   /opt/nextcloud   ext4   defaults   0 0' | sudo tee --append /etc/fstab > /dev/null
+#    - name: Add /dev/sdb1 to fstab file
+#      ansible.posix.mount:
+#        path: /opt/nextcloud
+#        src: /dev/sdb1
+#        fstype: ext4
+#        state: present
+##
+#      # sudo mount -a
+#      # sudo mount
+#    - name: Mount the partion
+#      shell: "{{ item }}"
+#      loop:
+#        - mount -a
+#        - mount
+#    ############## End - Mount the New or Existing drive ################
+
     - name: Install necessary packages for Nextcloud
       package:
         name:
@@ -304,11 +368,19 @@
         state: restarted
     ############## End - Setup database  #################
 
+    - name: Re-run ownership of /opt/nextcloud/data again
+      ansible.builtin.file:
+        path: /opt/nextcloud/data
+        state: directory
+        recurse: yes
+        owner: www-data
+        group: www-data
+
     - name: Runs the setup Wizard in CLI form - This takes the place of running the graphical Installation Wizard
       ansible.builtin.shell: 
         cmd: "{{ item }}"
       with_items:
-        - "sudo -u www-data php /var/www/nextcloud/occ  maintenance:install --database='mysql' --database-name='nextcloud' --database-user='{{ nextcloud_db_user }}' --database-pass='{{ nextcloud_db_pass }}' --admin-user='{{ nextcloud_admin_user }}' --admin-pass='{{ nextcloud_admin_pass }}'"
+        - "sudo -u www-data php /var/www/nextcloud/occ  maintenance:install --database='mysql' --database-name='nextcloud' --database-user='{{ nextcloud_db_user }}' --database-pass='{{ nextcloud_db_pass }}' --admin-user='{{ nextcloud_admin_user }}' --admin-pass='{{ nextcloud_admin_pass }}' --data-dir='/opt/nextcloud/data'"
       when: (config_file_status.stat.islnk is not defined) or (config_file_install_line_status.failed == true)
       no_log: True
 
@@ -375,13 +447,16 @@
         minute: "*/5"
         job: php -f /var/www/nextcloud/cron.php
 
-    - name: Re-run ownership of /var/www/nextcloud/ again
+    - name: Re-run ownership of /var/www/nextcloud/ and /opt/nextcloud again
       file:
-        path: /var/www/nextcloud/
+        path: "{{ item }}"
         state: directory
         recurse: yes
         owner: www-data
         group: www-data
+      loop:
+        - /var/www/nextcloud
+        - /opt/nextcloud
 
     - name: Enabling firewall
       command:
@@ -394,3 +469,16 @@
 
     - name: Unconditionally reboot the machine with all defaults
       reboot:
+  
+    ###### Begin - Set Apache to start after MariaDB service has started ##########
+    #- name: Grep line "After=" in Apache2 service line
+    #  command: grep -i After= /lib/systemd/system/apache2.service
+    #  register: service_line
+
+    #- name: Set Apache2 service to start after MariaDB service has started
+    #  ansible.builtin.lineinfile:
+    #    path: /lib/systemd/system/apache2.service
+    #    regexp: '^After='
+    #    line: "{{ service_line.stdout }} mariadb.service"
+    #  when: service_line.stdout.find('mariadb.service') == -1
+    ###### End - Set Apache to start after MariaDB service has started ############
