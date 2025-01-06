@@ -20,4 +20,4 @@
     - name: Include task - Get snapshot info and loop through info
       ansible.builtin.include_tasks:
         file: vmware_delete_old_snapshots_part_two.yml
-      loop: "{{ vm_info | community.general.json_query('virtual_machines[*]') }}"
+      loop: "{{ vm_info.virtual_machines }}"
