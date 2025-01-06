@@ -1,5 +1,4 @@
 ---
-
 - hosts: localhost
   vars:
     _ninety_days_ago_epoch: "{{ (ansible_date_time['epoch']|int)-(86400*90) }}"
