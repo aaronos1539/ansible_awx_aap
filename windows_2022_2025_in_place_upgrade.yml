@@ -45,7 +45,7 @@
       ansible.windows.win_stat:
         path: 'C:\CPU_MEM.txt'
       register: stat_file
-      delegate_to: "{{ vmware_guest_name }}.home.lan"
+      delegate_to: "{{ vmware_guest_name }}"
       vars:
         ansible_shell_type: powershell
 
@@ -55,7 +55,7 @@
         content: |
           {{ cpu_mem_configuration.instance.config.hardware.numCPU }}
           {{ cpu_mem_configuration.instance.config.hardware.memoryMB }}
-      delegate_to: "{{ vmware_guest_name }}.home.lan"
+      delegate_to: "{{ vmware_guest_name }}"
       vars:
         ansible_shell_type: powershell
       when: stat_file.stat.exists == false
