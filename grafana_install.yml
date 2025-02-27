@@ -1,0 +1,131 @@
+---
+- hosts: grafana.example.com
+  become: yes
+  become_user: root
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ipaddr_network: "{{ ansible_facts.default_ipv4.network }}"
+    ipaddr_prefix: "{{ ansible_facts.default_ipv4.prefix }}"
+    gmail_smtp_user: "{{ gmail_smtp_user_awx_survey_var }}"
+    gmail_smtp_pass: "{{ gmail_smtp_pass_awx_survey_var }}"
+    
+  tasks:
+    - name: Installing Support Packages
+      package:
+        name:
+          - apt-transport-https
+          - software-properties-common
+      
+    - name: Adding an Apt signing key for Grafana repository
+      ansible.builtin.apt_key:
+        url: https://packages.grafana.com/gpg.key
+        keyring: /etc/apt/trusted.gpg.d/grafana-repo.gpg
+        state: present
+        
+    - name: Adding the Grafana repository
+      ansible.builtin.apt_repository:
+        repo: deb https://packages.grafana.com/enterprise/deb stable main
+        state: present
+        
+    - name: Update cache and upgrade and then autoremove
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoremove: yes
+        
+    - name: Installing Granana
+      package:
+        name:
+          - grafana-enterprise
+          
+    - name: Restart daemon-reload to up config changes
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        
+    - name: Starting the Grafana service
+      ansible.builtin.systemd:
+        state: started
+        name: grafana-server
+        enabled: yes
+
+    - name: Create private key (RSA, 4096 bits)
+      community.crypto.openssl_privatekey:
+        path: /etc/grafana/grafana.key
+
+    - name: Create simple self-signed certificate
+      community.crypto.x509_certificate:
+        path: /etc/grafana/grafana.crt
+        privatekey_path: /etc/grafana/grafana.key
+        provider: selfsigned
+
+    - name: Change file ownership, group and permissions of Crt and Key
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: grafana
+        group: grafana
+        mode: '0400'
+      with_items:
+      - "/etc/grafana/grafana.key"
+      - "/etc/grafana/grafana.crt"
+
+    ############################
+    - name: Check if the backup file exists /etc/grafana/grafana.ini.bak
+      stat:
+        path: /etc/grafana/grafana.ini.bak
+      register: file_status
+
+    - name: Create the backup of /etc/grafana/grafana.ini if it does not exist
+      copy:
+        src: /etc/grafana/grafana.ini
+        dest: /etc/grafana/grafana.ini.bak
+        remote_src: yes
+      when: not file_status.stat.exists
+
+    - name: Restore the backup of /etc/grafana/grafana.ini if the the backup exists
+      copy:
+        src: /etc/grafana/grafana.ini.bak
+        dest: /etc/grafana/grafana.ini
+        remote_src: yes
+      when: file_status.stat.exists
+    ############################
+
+    - name: Adding the HTTPS configuration after [server]
+      replace:
+        path: /etc/grafana/grafana.ini
+        regexp: '^(\[server\])'
+        replace: |
+          [server]
+          http_addr =
+          http_port = 3000
+          domain = example.com
+          root_url = https://grafana.example.com:3000
+          cert_key = /etc/grafana/grafana.key
+          cert_file = /etc/grafana/grafana.crt
+          enforce_domain = False
+          protocol = https
+
+    - name: Adding the SMTP configuration after [smtp]
+      replace:
+        path: /etc/grafana/grafana.ini
+        regexp: '^(\[smtp\])'
+        replace: |
+          [smtp]
+          enabled = true
+          host = smtp.gmail.com:465
+          user = {{ gmail_smtp_user }}
+          password = {{ gmail_smtp_pass }}
+          skip_verify = false
+          from_address = {{ gmail_smtp_user }}@gmail.com
+          from_name = {{ gmail_smtp_user }}
+      no_log: True
+
+    - name: Enabling firewall and allowing ssh and port 3000
+      command:
+        cmd: "{{ item }}"
+      with_items:
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port ssh"
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port 3000"
+      - sudo ufw --force enable
+
+    - name: Unconditionally reboot the machine with all defaults
+      reboot:

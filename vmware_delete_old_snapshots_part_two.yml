@@ -1,0 +1,26 @@
+- name: Gather all snapshots for VMs
+  community.vmware.vmware_guest_snapshot_info:
+    hostname: "{{ vmware_datacenter }}"
+    username: "{{ vmware_username }}"
+    password: "{{ vmware_password }}"
+    datacenter: "{{ item.datacenter }}"
+    folder: "{{ item.folder }}"
+    name: "{{ item.guest_name }}"
+    validate_certs: no
+  register: vm_snapshot_facts
+
+- name: Filter and delete snapshots older than 90 days
+  community.vmware.vmware_guest_snapshot:
+    hostname: "{{ vmware_datacenter }}"
+    username: "{{ vmware_username }}"
+    password: "{{ vmware_password }}"
+    datacenter: "{{ item.datacenter }}"
+    folder: "{{ item.folder }}"
+    name: "{{ item.guest_name }}"
+    snapshot_name: "{{ item2.name }}"
+    state: absent
+    validate_certs: no
+  when: "(item2.creation_time | to_datetime('%Y-%m-%dT%H:%M:%S.%f%z')).strftime('%s') < _ninety_days_ago_epoch"
+  loop: "{{ vm_snapshot_facts.guest_snapshots.snapshots }}"
+  loop_control:
+    loop_var: item2

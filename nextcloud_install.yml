@@ -1,0 +1,484 @@
+---
+- hosts: testserver.example.com
+  become: yes
+  vars:
+    nextcloud_admin_user: "{{ nextcloud_admin_user_awx_survey_var }}"
+    nextcloud_admin_pass: "{{ nextcloud_admin_pass_awx_survey_var }}"
+    nextcloud_db_user: "{{ nextcloud_db_user_awx_survey_var }}"
+    nextcloud_db_pass: "{{ nextcloud_db_pass_awx_survey_var }}"
+    nextcloud_version: "https://download.nextcloud.com/server/releases/nextcloud-29.0.1.tar.bz2"
+    #nextcloud_version: "https://download.nextcloud.com/server/releases/nextcloud-28.0.4.tar.bz2"
+    server_time_zone: "America/Denver"
+    #Facts from Ansible gathering information
+    ipaddr_address: "{{ ansible_facts.default_ipv4.address }}"
+    ipaddr_network: "{{ ansible_facts.default_ipv4.network }}"
+    ipaddr_prefix: "{{ ansible_facts.default_ipv4.prefix }}"
+    
+  tasks:
+#    ####  WARNING == BEGIN - RUNNING THIS STEP WILL ERASE ALL DATA ON THE DRIVE - == BEGIN  ####
+#    ############## Begin - Setup separate drive with a new partiion for Nextcloud data ##############
+#    ############## Skip this section and go to Part 2 if the Drive already has data that you do NOT want to erase ##############
+##      
+#      #### Part 1
+#      #### Skip Part 1 and go to Part 2 if Drive has data that you do NOT want to erase
+##    
+#      # echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+#    - name: Scan the scsi_host for the new drive
+#      shell: echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+##
+#      # sudo parted --script /dev/sdb mklabel gpt mkpart primary '0%' '100%'
+#    - name: Create a new ext4 primary partition
+#      community.general.parted:
+#        device: /dev/sdb
+#        number: 1
+#        state: present
+#        fs_type: ext4
+##
+#      # sudo mkfs.ext4 /dev/sdb1
+#    - name: Create a ext4 filesystem on /dev/sdb1
+#      community.general.filesystem:
+#        fstype: ext4
+#        dev: /dev/sdb1
+#    ############## End - Setup separate drive with a new partiion for Nextcloud data ################
+#    ####  WARNING == END - RUNNING THIS STEP WILL ERASE ALL DATA ON THE DRIVE - == END  ####
+
+
+#    ############## Begin - Mount the New or Existing drive ##############
+#    ############## Start with this section if the drive already has data on the drive and you do NOT want to erase the drive ##############
+##      
+#      #### Part 2
+##
+#      # echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+#    - name: Scan the scsi_host for the new drive
+#      shell: echo "- - -" | sudo tee /sys/class/scsi_host/host*/scan
+##
+#      # sudo mkdir -p /opt/nextcloud
+#      # chown -R www-data:www-data /opt/nextcloud
+#    - name: Create the /opt/nextcloud folder
+#      ansible.builtin.file:
+#        path: /opt/nextcloud
+#        state: directory
+#        recurse: yes
+#        owner: www-data
+#        group: www-data
+##
+#      # echo '/dev/sdb1   /opt/nextcloud   ext4   defaults   0 0' | sudo tee --append /etc/fstab > /dev/null
+#    - name: Add /dev/sdb1 to fstab file
+#      ansible.posix.mount:
+#        path: /opt/nextcloud
+#        src: /dev/sdb1
+#        fstype: ext4
+#        state: present
+##
+#      # sudo mount -a
+#      # sudo mount
+#    - name: Mount the partion
+#      shell: "{{ item }}"
+#      loop:
+#        - mount -a
+#        - mount
+#    ############## End - Mount the New or Existing drive ################
+
+    - name: Install necessary packages for Nextcloud
+      package:
+        name:
+          - apache2
+          - mariadb-server
+          - libapache2-mod-php
+          - php-apcu
+          - php-gd
+          - php-json
+          - php-mysql
+          - php-curl
+          - php-mbstring
+          - php-intl
+          - php-imagick
+          - php-xml
+          - php-zip
+          - redis-server
+          - php-redis
+          - php-bcmath
+          - php-gmp
+          - python3-pymysql
+          - imagemagick
+          - php-bz2
+          - bzip2
+        state: present
+
+    ############## Begin - Checking if Nextcloud files should be downloaded ###############
+    - name: Checking if /var/www/nextcloud/config/config.php exists
+      ansible.builtin.stat:
+        path: /var/www/nextcloud/config/config.php
+      register: config_file_status
+
+    - name: Checking if Nextcloud has already been installed
+      ansible.builtin.lineinfile:
+        name: /var/www/nextcloud/config/config.php
+        line: "'installed' => true,"
+        state: present
+      check_mode: true
+      register: config_file_install_line_status
+      when: config_file_status.stat.islnk is defined
+
+    - name: Download and untar the Nextcloud install files if /var/www/nextcloud/config/config.php does not contain "'installed' => true," or if config.php does not exsits
+      unarchive:
+        src: "{{ nextcloud_version }}"
+        dest: /var/www
+        remote_src: yes
+      when: (config_file_status.stat.islnk is not defined) or (config_file_install_line_status.failed == true)
+    ############## End - Checking if Nextcloud files should be downloaded #################
+
+    - name: Change ownership of /var/www/nextcloud/
+      file:
+        path: /var/www/nextcloud/
+        state: directory
+        recurse: yes
+        owner: www-data
+        group: www-data
+
+    - name: Set the timezone to {{ server_time_zone }}
+      shell: timedatectl set-timezone "{{ server_time_zone }}"
+      
+    ############## Begin - Create /etc/apache2/sites-available/nextcloud.conf ###############
+    - name: Create /etc/apache2/sites-available/nextcloud.conf
+      copy:
+        dest: /etc/apache2/sites-available/nextcloud.conf
+        content: |
+          <VirtualHost *:80>
+            DocumentRoot /var/www/nextcloud/
+            ServerName {{ inventory_hostname }}
+            <Directory /var/www/nextcloud/>
+              Require all granted
+              AllowOverride All
+              Options FollowSymLinks MultiViews
+              <IfModule mod_dav.c>
+                Dav off
+              </IfModule>
+              SetEnv HOME /var/www/nextcloud
+              SetEnv HTTP_HOME /var/www/nextcloud
+              Satisfy Any
+            </Directory>
+          </VirtualHost>
+        mode: u=rw,g=r,o=r
+    ############## End - Create /etc/apache2/sites-available/nextcloud.conf #################
+    
+    ############## Begin - Edit PHP files ##################################################
+    - name: Find PHP version
+      shell: php --version | head -n 1 | awk -F'[ -]' '{print $2}' | awk -F'[.]' '{print $1"."$2}'
+      register: php_version_output
+
+    ### Begin - Create or Restore backup PHP files - File 1 #########################
+    - name: Check if the backup file exists /etc/php/{{ php_version_output.stdout }}/cli/php.ini.cleanbackup
+      stat:
+        path: /etc/php/{{ php_version_output.stdout }}/cli/php.ini.cleanbackup
+      register: file_status
+
+    - name: Create the backup of /etc/php/{{ php_version_output.stdout }}/cli/php.ini if it does not exist
+      copy:
+        src: /etc/php/{{ php_version_output.stdout }}/cli/php.ini
+        dest: /etc/php/{{ php_version_output.stdout }}/cli/php.ini.cleanbackup
+        remote_src: yes
+      when: not file_status.stat.exists
+
+    - name: Restore the backup of /etc/php/{{ php_version_output.stdout }}/cli/php.ini if the the backup exists
+      copy:
+        src: /etc/php/{{ php_version_output.stdout }}/cli/php.ini.cleanbackup
+        dest: /etc/php/{{ php_version_output.stdout }}/cli/php.ini
+        remote_src: yes
+      when: file_status.stat.exists
+    ### End - Create or Restore backup PHP files - File 1 ###########################
+
+    ### Begin - Create or Restore backup PHP files - File 2 #########################
+    - name: Check if the backup file exists /etc/php/{{ php_version_output.stdout }}/apache2/php.ini.cleanbackup
+      stat:
+        path: /etc/php/{{ php_version_output.stdout }}/apache2/php.ini.cleanbackup
+      register: file_status
+
+    - name: Create the backup of /etc/php/{{ php_version_output.stdout }}/apache2/php.ini if it does not exist
+      copy:
+        src: /etc/php/{{ php_version_output.stdout }}/apache2/php.ini
+        dest: /etc/php/{{ php_version_output.stdout }}/apache2/php.ini.cleanbackup
+        remote_src: yes
+      when: not file_status.stat.exists
+
+    - name: Restore the backup of /etc/php/{{ php_version_output.stdout }}/apache2/php.ini if the the backup exists
+      copy:
+        src: /etc/php/{{ php_version_output.stdout }}/apache2/php.ini.cleanbackup
+        dest: /etc/php/{{ php_version_output.stdout }}/apache2/php.ini
+        remote_src: yes
+      when: file_status.stat.exists
+    ### End - Create or Restore backup PHP files - File 2 ###########################
+
+    - name: Adding lines to php.ini files
+      blockinfile:
+        path: "{{ item }}"
+        block: |
+          date.timezone = {{ server_time_zone }}
+          opcache.enable=1
+          opcache.enable_cli=1
+          opcache.interned_strings_buffer=16
+          opcache.max_accelerated_files=10000
+          opcache.memory_consumption=128
+          opcache.save_comments=1
+          opcache.revalidate_freq=1
+          apc.enable_cli=1
+        marker: "; {mark} ANSIBLE MANAGED BLOCK"
+        state: present
+      with_items:
+      - "/etc/php/{{ php_version_output.stdout }}/cli/php.ini"
+      - "/etc/php/{{ php_version_output.stdout }}/apache2/php.ini"
+
+    - name: Increase PHP memory limit on /etc/php/{{ php_version_output.stdout }}/cli/php.ini
+      ansible.builtin.lineinfile:
+        path: /etc/php/{{ php_version_output.stdout }}/cli/php.ini
+        regexp: "{{ item.regex }}"
+        line: "{{ item.newline }}"
+      with_items:
+      - { regex: '^memory_limit =', newline: memory_limit = 512M }
+      - { regex: '^upload_max_filesize =', newline: upload_max_filesize = 2048M }
+      - { regex: '^post_max_size =', newline: post_max_size = 2048M }
+
+    - name: Increase PHP memory limit on /etc/php/{{ php_version_output.stdout }}/apache2/php.ini
+      ansible.builtin.lineinfile:
+        path: /etc/php/{{ php_version_output.stdout }}/apache2/php.ini
+        regexp: "{{ item.regex }}"
+        line: "{{ item.newline }}"
+      with_items:
+      - { regex: '^memory_limit =', newline: memory_limit = 512M }
+      - { regex: '^upload_max_filesize =', newline: upload_max_filesize = 2048M }
+      - { regex: '^post_max_size =', newline: post_max_size = 2048M }
+    ############## End - Edit PHP files ####################################################
+
+    ############## Begin - Edit /etc/apache2/sites-available/000-default.conf  ###############
+    ### Begin - Create or Restore backup 000-default.conf #########################
+    - name: Check if the backup file exists /etc/apache2/sites-available/000-default.conf.cleanbackup
+      stat:
+        path: /etc/apache2/sites-available/000-default.conf.cleanbackup
+      register: file_status
+
+    - name: Create the backup of /etc/apache2/sites-available/000-default.conf if it does not exist
+      copy:
+        src: /etc/apache2/sites-available/000-default.conf
+        dest: /etc/apache2/sites-available/000-default.conf.cleanbackup
+        remote_src: yes
+      when: not file_status.stat.exists
+
+    - name: Restore the backup of /etc/apache2/sites-available/000-default.conf if the the backup exists
+      copy:
+        src: /etc/apache2/sites-available/000-default.conf.cleanbackup
+        dest: /etc/apache2/sites-available/000-default.conf
+        remote_src: yes
+      when: file_status.stat.exists
+    ### End - Create or Restore backup 000-default.conf ###########################
+
+    - name: Edit /etc/apache2/sites-available/000-default.conf
+      ansible.builtin.lineinfile:
+        path: /etc/apache2/sites-available/000-default.conf
+        regexp: '^\s*DocumentRoot'
+        line: |
+          DocumentRoot /var/www/nextcloud
+          RedirectPermanent / https://{{ ipaddr_address }}/
+          ServerName {{ inventory_hostname }}
+    ############## End - Edit /etc/apache2/sites-available/000-default.conf  #################
+
+    ############## Begin - Edit /etc/apache2/sites-available/default-ssl.conf  ###############
+    ### Begin - Create or Restore backup default-ssl.conf  #########################
+    - name: Check if the backup file exists /etc/apache2/sites-available/default-ssl.conf.cleanbackup
+      stat:
+        path: /etc/apache2/sites-available/default-ssl.conf.cleanbackup
+      register: file_status
+
+    - name: Create the backup of /etc/apache2/sites-available/default-ssl.conf if it does not exist
+      copy:
+        src: /etc/apache2/sites-available/default-ssl.conf
+        dest: /etc/apache2/sites-available/default-ssl.conf.cleanbackup
+        remote_src: yes
+      when: not file_status.stat.exists
+
+    - name: Restore the backup of /etc/apache2/sites-available/default-ssl.conf if the the backup exists
+      copy:
+        src: /etc/apache2/sites-available/default-ssl.conf.cleanbackup
+        dest: /etc/apache2/sites-available/default-ssl.conf
+        remote_src: yes
+      when: file_status.stat.exists
+    ### End - Create or Restore backup default-ssl.conf  ###########################
+
+    - name: Edit /etc/apache2/sites-available/default-ssl.conf
+      ansible.builtin.lineinfile:
+        path: /etc/apache2/sites-available/default-ssl.conf
+        regexp: '^\s*DocumentRoot'
+        line: |
+          DocumentRoot /var/www/nextcloud/
+          ServerName {{ inventory_hostname }}
+          Header always set Strict-Transport-Security "max-age=15552000; includeSubDomains"
+          <Directory /var/www/nextcloud/>
+            Require all granted
+            AllowOverride All
+            Options FollowSymLinks MultiViews
+            <IfModule mod_dav.c>
+              Dav off
+            </IfModule>
+            SetEnv HOME /var/www/nextcloud
+            SetEnv HTTP_HOME /var/www/nextcloud
+            Satisfy Any
+          </Directory>
+    ############## End - Edit /etc/apache2/sites-available/default-ssl.conf  #################
+
+    - name: Enable Apache2 sites and mods
+      ansible.builtin.shell:
+        cmd: "{{ item }}"
+      with_items:
+        - "a2ensite default-ssl"
+        - "a2ensite nextcloud.conf"
+        - "a2enmod rewrite"
+        - "a2enmod headers"
+        - "a2enmod env"
+        - "a2enmod dir"
+        - "a2enmod mime"
+        - "a2enmod ssl"
+
+    - name: Restart Apache2 service
+      ansible.builtin.service:
+        name: apache2
+        state: restarted
+
+    ############## Begin - Setup database  ###############
+    - name: Create database user with password and all database privileges and 'WITH GRANT OPTION'
+      community.mysql.mysql_user:
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        check_implicit_admin: true
+        login_user: root
+        name: "{{ nextcloud_db_user }}"
+        password: "{{ nextcloud_db_pass }}"
+        priv: '*.*:ALL,GRANT'
+        state: present
+      no_log: True
+
+    - name: Create a new database with name 'nextcloud'
+      community.mysql.mysql_db:
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        name: nextcloud
+        encoding: utf8mb4
+        collation: utf8mb4_general_ci
+        state: present
+
+    - name: Restart Mariadb service
+      ansible.builtin.service:
+        name: mariadb
+        state: restarted
+    ############## End - Setup database  #################
+
+    - name: Re-run ownership of /opt/nextcloud/data again
+      ansible.builtin.file:
+        path: /opt/nextcloud/data
+        state: directory
+        recurse: yes
+        owner: www-data
+        group: www-data
+
+    - name: Runs the setup Wizard in CLI form - This takes the place of running the graphical Installation Wizard
+      ansible.builtin.shell: 
+        cmd: "{{ item }}"
+      with_items:
+        - "sudo -u www-data php /var/www/nextcloud/occ  maintenance:install --database='mysql' --database-name='nextcloud' --database-user='{{ nextcloud_db_user }}' --database-pass='{{ nextcloud_db_pass }}' --admin-user='{{ nextcloud_admin_user }}' --admin-pass='{{ nextcloud_admin_pass }}' --data-dir='/opt/nextcloud/data'"
+      when: (config_file_status.stat.islnk is not defined) or (config_file_install_line_status.failed == true)
+      no_log: True
+
+    ############## Begin - Edit /var/www/nextcloud/config/config.php  ###############
+    ### Begin - Create or Restore backup /var/www/nextcloud/config/config.php  #########################
+    - name: Check if the backup file exists /var/www/nextcloud/config/config.php.cleanbackup
+      stat:
+        path: /var/www/nextcloud/config/config.php.cleanbackup
+      register: file_status
+
+    - name: Create the backup of /var/www/nextcloud/config/config.php if it does not exist
+      copy:
+        src: /var/www/nextcloud/config/config.php
+        dest: /var/www/nextcloud/config/config.php.cleanbackup
+        remote_src: yes
+      when: not file_status.stat.exists
+
+    - name: Restore the backup of /var/www/nextcloud/config/config.php if the the backup exists
+      copy:
+        src: /var/www/nextcloud/config/config.php.cleanbackup
+        dest: /var/www/nextcloud/config/config.php
+        remote_src: yes
+      when: file_status.stat.exists
+    ### End - Create or Restore backup /var/www/nextcloud/config/config.php  ###########################
+    
+    - name: Edit trusted_domains on /var/www/nextcloud/config/config.php
+      ansible.builtin.replace:
+        path: /var/www/nextcloud/config/config.php
+        regexp: '(^\s*.trusted_domains[\s\S]*)\)\,'
+        replace: |
+          'trusted_domains' =>
+          array (
+            0 => 'localhost',
+            1 => '{{ ipaddr_address }}',
+            2 => '{{ inventory_hostname }}',
+          ),
+
+    - name: Set post configuration /var/www/nextcloud/config/config.php setup - Pretty URLs - memory caching - default_phone_region - maintenance_window_start
+      ansible.builtin.lineinfile:
+        path: /var/www/nextcloud/config/config.php
+        regexp: '^\s*.overwrite'
+        line: |
+            'overwrite.cli.url' => 'https://{{ ipaddr_address }}',
+            'htaccess.RewriteBase' => '/',
+            'memcache.local' => '\OC\Memcache\APCu',
+            'redis' =>
+            array (
+              'host' => 'localhost',
+              'port' => 6379,
+            ),
+            'memcache.locking' => '\OC\Memcache\Redis',
+            'default_timezone' => '{{ server_time_zone }}',
+            'default_phone_region' => 'US',
+            'maintenance_window_start' => 10,
+    ############## End - Edit /var/www/nextcloud/config/config.php ##################
+
+    - name: Reload htaccess file
+      shell: sudo -u www-data php /var/www/nextcloud/occ maintenance:update:htaccess
+
+    - name: Creating Cron job to run /var/www/nextcloud/cron.php every 5 minutes
+      ansible.builtin.cron:
+        name: "Nextcloud Cron Job"
+        user: www-data
+        minute: "*/5"
+        job: php -f /var/www/nextcloud/cron.php
+
+    - name: Re-run ownership of /var/www/nextcloud/ and /opt/nextcloud again
+      file:
+        path: "{{ item }}"
+        state: directory
+        recurse: yes
+        owner: www-data
+        group: www-data
+      loop:
+        - /var/www/nextcloud
+        - /opt/nextcloud
+
+    - name: Enabling firewall
+      command:
+        cmd: "{{ item }}"
+      with_items:
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port ssh"
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port https"
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port http"
+      - sudo ufw --force enable
+
+    - name: Unconditionally reboot the machine with all defaults
+      reboot:
+  
+    ###### Begin - Set Apache to start after MariaDB service has started ##########
+    #- name: Grep line "After=" in Apache2 service line
+    #  command: grep -i After= /lib/systemd/system/apache2.service
+    #  register: service_line
+
+    #- name: Set Apache2 service to start after MariaDB service has started
+    #  ansible.builtin.lineinfile:
+    #    path: /lib/systemd/system/apache2.service
+    #    regexp: '^After='
+    #    line: "{{ service_line.stdout }} mariadb.service"
+    #  when: service_line.stdout.find('mariadb.service') == -1
+    ###### End - Set Apache to start after MariaDB service has started ############

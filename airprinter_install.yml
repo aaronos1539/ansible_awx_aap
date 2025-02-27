@@ -1,0 +1,97 @@
+---
+- hosts: airprinter.example.com
+  become: yes
+  become_user: root
+  vars:
+    lpadmin_User: "{{ lpadmin_User_AWX_var }}"
+    ansible_python_interpreter: /usr/bin/python3
+    # This splits the ip address at the period,
+    # Then gets the first 3 items of the split and re-joins them with a period
+    ipaddr_3_parts_joined: "{{ ansible_facts.default_ipv4.network.split('.')[:3] | join('.') }}"
+    ipaddr_network: "{{ ansible_facts.default_ipv4.network }}"
+    ipaddr_prefix: "{{ ansible_facts.default_ipv4.prefix }}"
+    
+  tasks:
+    - name: Installing Samba, Cups, Avahi-discover, Hplip and Printer-driver-brlaser
+      package:
+        name:
+          - samba
+          - cups
+          - avahi-discover
+          - hplip
+          - printer-driver-brlaser
+         
+    - name: Adding user to lpadmin group
+      ansible.builtin.user:
+        name: "{{ lpadmin_User }}"
+        groups: lpadmin
+        append: yes
+
+    - name: Adding lines to the file "/etc/samba/smb.conf"
+      blockinfile:
+        path: /etc/samba/smb.conf
+        block: |
+          # CUPS printing.  See also the cupsaddsmb(8) manpage in the cupsys-client package.
+          printing = cups
+          printcap name = cups
+          [printers]
+          comment = All Printers
+          browseable = no
+          path = /var/spool/samba
+          printable = yes
+          guest ok = yes
+          read only = yes
+          create mask = 0700
+
+          # Windows clients look for this share name as a source of downloadable printer drivers
+          [print$]
+          comment = Printer Drivers
+          path = /usr/share/cups/drivers
+          browseable = yes
+          read only = yes
+          guest ok = no
+        state: present
+        
+    ############################
+    - name: Check if the backup file exists /etc/cups/cupsd.conf.bak
+      stat:
+        path: /etc/cups/cupsd.conf.bak
+      register: file_status
+
+    - name: Create the backup of /etc/cups/cupsd.conf if it does not exist
+      copy:
+        src: /etc/cups/cupsd.conf
+        dest: /etc/cups/cupsd.conf.bak
+        remote_src: yes
+      when: not file_status.stat.exists
+
+    - name: Restore the backup of /etc/cups/cupsd.conf if the the backup exists
+      copy:
+        src: /etc/cups/cupsd.conf.bak
+        dest: /etc/cups/cupsd.conf
+        remote_src: yes
+      when: file_status.stat.exists
+    ############################   
+
+    - name: Replaceing Listen localhost with Port
+      replace:
+        path: /etc/cups/cupsd.conf
+        regexp: '^(Listen localhost:631)'
+        replace: "Port 631"
+    
+    - name: Inserting allow IP address range
+      replace:
+        path: /etc/cups/cupsd.conf
+        regexp: '^(.+Order allow,deny\n</Location>)'
+        replace: "Order allow,deny\nAllow {{ ipaddr_3_parts_joined }}.*\n</Location>"
+
+    - name: Enabling firewall and allowing ssh and port 631
+      command:
+        cmd: "{{ item }}"
+      with_items:
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port ssh"
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port 631"
+      - sudo ufw --force enable
+
+    - name: Unconditionally reboot the machine with all defaults
+      reboot:

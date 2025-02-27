@@ -1,0 +1,22 @@
+---
+- hosts: localhost
+  vars:
+    _ninety_days_ago_epoch: "{{ (ansible_date_time['epoch']|int)-(86400*90) }}"
+    vmware_datacenter: '<IP address of datacenter>'
+    vmware_username: '<vmware username>'
+    vmware_password: '<wmware password>'
+
+  tasks:
+    - name: Get VM guests
+      community.vmware.vmware_vm_info:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+      delegate_to: localhost
+      register: vm_info
+
+    - name: Include task - Get snapshot info and loop through info
+      ansible.builtin.include_tasks:
+        file: vmware_delete_old_snapshots_part_two.yml
+      loop: "{{ vm_info.virtual_machines }}"

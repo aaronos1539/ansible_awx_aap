@@ -1,0 +1,270 @@
+---
+- hosts: prometheus.example.com
+  become: yes
+  become_user: root
+  vars:
+    prometheus_admin_password_var: "{{ prometheus_admin_pass_awx_survey_var }}"
+    prometheus_node_exporter_password_var: "{{ prometheus_node_exporter_pass_awx_survey_var }}" # This is a clear text password in /etc/prometheus/prometheus.yml
+    ### Path to get the latest version of the Prometheus SNMP Exporter
+    ### https://github.com/prometheus/snmp_exporter/releases
+    prometheus_snmp_exporter_version: "0.26.0"
+    web_external_url_var: "https://{{ inventory_hostname }}"
+    ansible_python_interpreter: /usr/bin/python3
+    ipaddr_network: "{{ ansible_facts.default_ipv4.network }}"
+    ipaddr_prefix: "{{ ansible_facts.default_ipv4.prefix }}"
+    node_exporter_target_list: |
+      - test1.example.com:9100
+              - test2.example.com:9100
+              - test3.example.com:9100
+              - test4.example.com:9100
+              - test5.example.com:9100
+    snmp_exporter_target_list: |
+      - test1.example.com
+              - test2.example.com
+    
+  tasks:
+    - name: Installing Prometheus
+      package:
+        name:
+          - prometheus
+          #- prometheus-snmp-exporter
+
+    ## Begin - Setup SNMP Exporter #################################################      
+    - name: Checking if SNMP Exporter folder exists
+      stat:
+        path: "/snmp_exporter-{{ prometheus_snmp_exporter_version }}.linux-amd64"
+      register: snmp_exporter_file_download_status
+      
+    - name: Unarchive SNMP Exporter file
+      ansible.builtin.unarchive:
+        src: "https://github.com/prometheus/snmp_exporter/releases/download/v{{ prometheus_snmp_exporter_version }}/snmp_exporter-{{ prometheus_snmp_exporter_version }}.linux-amd64.tar.gz"
+        dest: /
+        remote_src: yes
+      when: snmp_exporter_file_download_status.stat.exists == False
+
+    - name: Creating snmp-exporter.service
+      copy:
+        dest: /lib/systemd/system/snmp-exporter.service
+        content: |
+          [Unit]
+          Description=SNMP Exporter
+          After=network-online.target
+          
+          # This assumes you are running snmp_exporter under the user "prometheus"
+          [Service]
+          User=prometheus
+          Restart=on-failure
+          ExecStart=/snmp_exporter-{{ prometheus_snmp_exporter_version }}.linux-amd64/snmp_exporter --config.file=/snmp_exporter-{{ prometheus_snmp_exporter_version }}.linux-amd64/snmp.yml
+          
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Just force systemd to reread configs (2.4 and above)
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable service snmp-exporter
+      ansible.builtin.service:
+        name: snmp-exporter
+        enabled: yes
+
+    - name: Start service snmp-exporter, if not started
+      ansible.builtin.service:
+        name: snmp-exporter
+        state: started
+    ## End - Setup SNMP Exporter ###################################################
+
+    - name: Create the configuration file /etc/prometheus/prometheus.yml for the SNMP Exporter
+      copy:
+        dest: /etc/prometheus/prometheus.yml
+        content: |
+          global:
+            scrape_interval:     300s
+            ##scrape_interval:     15s # Set the scrape interval to every 15 seconds. Default is every 1 minute.
+            ##evaluation_interval: 15s # Evaluate rules every 15 seconds. The default is every 1 minute.
+            # scrape_timeout is set to the global default (10s).
+            # Attach these labels to any time series or alerts when communicating with
+            # external systems (federation, remote storage, Alertmanager).
+            external_labels:
+                monitor: 'example'
+          # Alertmanager configuration
+          alerting:
+            alertmanagers:
+            - static_configs:
+              - targets: ['localhost:9093']
+          # Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+          rule_files:
+            # - "first_rules.yml"
+            # - "second_rules.yml"
+          # A scrape configuration containing exactly one endpoint to scrape:
+          # Here it's Prometheus itself.
+          scrape_configs:
+            # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+            - job_name: 'prometheus'
+              # Override the global default and scrape targets from this job every 5 seconds.
+              scrape_interval: 300s
+              ##scrape_interval: 5s
+              scrape_timeout: 5s
+              # metrics_path defaults to '/metrics'
+              # scheme defaults to 'http'.
+              static_configs:
+                - targets: ['localhost:9090']
+            - job_name: node
+              # If prometheus-node-exporter is installed, grab stats about the local
+              # machine by default.
+              ## Begin - Node Exporter TLS #############################
+              scheme: https
+              basic_auth:
+                username: "prometheus"
+                password: "{{ prometheus_node_exporter_password_var }}"
+              tls_config:
+                ca_file: /etc/prometheus_node_exporter/node_exporter.crt
+                insecure_skip_verify: true
+              ## End - Node Exporter TLS ###############################
+              static_configs:
+                - targets:
+                  - 'localhost:9100'
+                  {{ node_exporter_target_list }}
+              ## Begin - Relabel ###############################################
+              relabel_configs:
+                - source_labels: [__address__]
+                  target_label: instance
+                  regex: '([^:]+)(:[0-9]+)?'
+                  replacement: '${1}'
+              ## End - Relabel #################################################
+            - job_name: node_http
+              # If prometheus-node-exporter is installed, grab stats about the local
+              # machine by default.
+              static_configs:
+                - targets:
+                  #- test.example.com:9100
+            - job_name: snmp
+              metrics_path: /snmp
+              params:
+                module: [if_mib]
+              static_configs:
+                - targets:
+                  #- 127.0.0.1
+                  {{ snmp_exporter_target_list }}
+              relabel_configs:
+                - source_labels: [__address__]
+                  target_label: __param_target
+                - source_labels: [__param_target]
+                  target_label: instance
+                - target_label: __address__
+                  replacement: 127.0.0.1:9116  # URL as shown on the UI
+    
+    ## Beging - Setup TLS #############################################################################
+    - name: Create SSL Key for Prometheus
+      community.crypto.openssl_privatekey:
+        path: /etc/prometheus/prometheus.key
+
+    - name: Create simple self-signed certificate
+      community.crypto.x509_certificate:
+        path: /etc/prometheus/prometheus.crt
+        privatekey_path: /etc/prometheus/prometheus.key
+        provider: selfsigned
+
+    - name: Change file ownership, group and permissions of Crt and Key
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: prometheus
+        group: prometheus
+        mode: '0400'
+      with_items:
+      - "/etc/prometheus/prometheus.key"
+      - "/etc/prometheus/prometheus.crt"  
+    
+    - name: Installing apache2-utils to install the command htpasswd
+      package:
+        name:
+          - apache2-utils
+
+    - name: Create the encrypted admin password
+      ansible.builtin.shell: 
+        cmd: "htpasswd -nbB '' {{ prometheus_admin_password_var }} | tr -d ':'"
+      register: htpasswd_output
+      no_log: True
+    
+    - name: Create the configuration file /etc/prometheus/web-config.yml
+      copy:
+        dest: /etc/prometheus/web-config.yml
+        content: |
+          tls_server_config:
+            cert_file: /etc/prometheus/prometheus.crt
+            key_file: /etc/prometheus/prometheus.key
+          basic_auth_users:
+            admin: {{ htpasswd_output.stdout }}
+      no_log: True
+
+    - name: Add the ARGs to /etc/default/prometheus
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus
+        regexp: '^ARGS='
+        line: ARGS="--config.file=/etc/prometheus/prometheus.yml --web.config.file=/etc/prometheus/web-config.yml --web.external-url={{ web_external_url_var }}"
+    ## End - Setup TLS #####################################################################################
+
+    ## Begin - Setup TLS for Node Exporter #################################################################
+    - name: Create /etc/prometheus_node_exporter if it does not exist
+      ansible.builtin.file:
+        path: /etc/prometheus_node_exporter
+        state: directory
+        mode: '0755'
+    
+    - name: Create SSL Key for Node Exporter
+      community.crypto.openssl_privatekey:
+        path: /etc/prometheus_node_exporter/node_exporter.key
+
+    - name: Create simple self-signed certificate for Node Exporter
+      community.crypto.x509_certificate:
+        path: /etc/prometheus_node_exporter/node_exporter.crt
+        privatekey_path: /etc/prometheus_node_exporter/node_exporter.key
+        provider: selfsigned
+
+    - name: Change file ownership, group and permissions of Crt and Key for Node Exporter
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: prometheus
+        group: prometheus
+        mode: '0400'
+      with_items:
+      - "/etc/prometheus_node_exporter/node_exporter.key"
+      - "/etc/prometheus_node_exporter/node_exporter.crt"
+
+    - name: Create the encrypted Node Exporter password
+      ansible.builtin.shell: 
+        cmd: "htpasswd -nbB '' {{ prometheus_node_exporter_password_var }} | tr -d ':'"
+      register: htpasswd_output_2
+      no_log: True
+
+    - name: Create the configuration file /etc/prometheus_node_exporter/configuration.yml 
+      copy:
+        dest: /etc/prometheus_node_exporter/configuration.yml
+        content: |
+          tls_server_config:
+            cert_file: /etc/prometheus_node_exporter/node_exporter.crt
+            key_file: /etc/prometheus_node_exporter/node_exporter.key
+          basic_auth_users:
+            prometheus: {{ htpasswd_output_2.stdout }}
+      no_log: True
+
+    - name: Add the ARGs to /etc/default/prometheus-node-exporter
+      ansible.builtin.lineinfile:
+        path: /etc/default/prometheus-node-exporter
+        regexp: '^ARGS='
+        line: ARGS="--web.config=/etc/prometheus_node_exporter/configuration.yml"
+    ## End - Setup TLS for Node Exporter ###################################################################
+
+    - name: Enabling firewall and allowing ssh and port 9090 and start Prometheus
+      command:
+        cmd: "{{ item }}"
+      with_items:
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port ssh"
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port 9090"
+      - "ufw allow from {{ ipaddr_network }}/{{ ipaddr_prefix }} to any port 9116"
+      - sudo ufw --force enable
+      #- "ufw allow from {{ awx_controller_ip }} to any port ssh"
+
+    - name: Unconditionally reboot the machine with all defaults
+      reboot:
+

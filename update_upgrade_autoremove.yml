@@ -1,0 +1,11 @@
+- hosts: all
+  become: yes
+  vars:
+    ansible_python_interpreter: "{{ansible_playbook_python}}"
+  
+  tasks:
+    - name: Update cache and upgrade and then autoremove
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoremove: yes
