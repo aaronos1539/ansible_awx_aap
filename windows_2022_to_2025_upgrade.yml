@@ -1,0 +1,391 @@
+---
+- hosts: localhost
+  gather_facts: false
+  vars:
+    vmware_datacenter: "{{ survay_guest_vcenter_ip }}"
+    vmware_username: "{{ vault_var_vmware_username }}"
+    vmware_password: "{{ vault_var_vmware_password }}"
+    vmware_guest_name: "{{ survay_guest_vm_name }}"
+    server_dns_name: "{{ vmware_guest_name }}.example.com"
+    vmware_snap_name: 'Before In Place Upgrade'
+    vmware_iso_path: '[datastore1] 26100.1742.240906-0331.ge_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso'
+
+  tasks:
+###### Begin - Get Datacenter and Folder information from the VM #####################
+    - name: Get VM Guest Information
+      community.vmware.vmware_vm_info:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+      delegate_to: localhost
+      register: vm_info
+
+    - name: Setting the datacenter and folder facts
+      ansible.builtin.set_fact:
+        fact_datacenter: "{{ vm_info_loop_var.datacenter }}"
+        fact_folder: "{{ vm_info_loop_var.folder }}"
+      when: vm_info_loop_var.guest_name == vmware_guest_name
+      loop: "{{ vm_info.virtual_machines }}"
+      loop_control:
+        loop_var: vm_info_loop_var
+###### End - Get Datacenter and Folder information from the VM #####################
+
+    - name: Wait for the virtual machine to power on
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        state: powered-on
+        state_change_timeout: 200
+      delegate_to: localhost
+      register: deploy
+
+    - name: Wait for VMware tools to become available
+      community.vmware.vmware_guest_tools_wait:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        folder: "{{ fact_folder }}"
+        datacenter: "{{ fact_datacenter }}"
+      delegate_to: localhost
+      register: facts
+
+    - name: Getting the CPU and Memory configuration from the VM
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        datacenter: "{{ fact_datacenter }}"
+        name: "{{ vmware_guest_name }}"
+        schema: "vsphere"
+        properties: ["config.hardware.memoryMB", "config.hardware.numCPU"]
+      delegate_to: localhost
+      register: cpu_mem_configuration
+
+    - name: Check for existance of file that contains original CPU/Memory configuration
+      ansible.windows.win_stat:
+        path: 'C:\CPU_MEM.txt'
+      register: stat_file
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+
+    - name: Create CPU/Memory configuration file if it does not exist
+      ansible.windows.win_copy:
+        dest: 'C:\CPU_MEM.txt'
+        content: |
+          {{ cpu_mem_configuration.instance.config.hardware.numCPU }}
+          {{ cpu_mem_configuration.instance.config.hardware.memoryMB }}
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+      when: stat_file.stat.exists == false
+
+    - name: Checks if server version OS is 2022
+      win_shell: |
+        systeminfo | findstr /B /C:"OS Name" | findstr /C:"2022"
+      #win_shell: |
+      #  systeminfo | findstr /B /C:"OS Name" | findstr /C:"2025"
+      register: windows_os_version
+      ignore_errors: true
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+
+    - name: Wait for the virtual machine to shutdown
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        state: shutdown-guest
+        state_change_timeout: 200
+      delegate_to: localhost
+      register: deploy
+
+    - name: Create a snapshot
+      community.vmware.vmware_guest_snapshot:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        datacenter: "{{ fact_datacenter }}"
+        folder: "{{ fact_folder }}"
+        name: "{{ vmware_guest_name }}"
+        state: present
+        snapshot_name: "{{ vmware_snap_name }}"
+        description: "{{ vmware_snap_name }}"
+      delegate_to: localhost
+
+    - name: Adjust the cpu if nessesary
+      community.vmware.vmware_guest:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        datacenter: "{{ fact_datacenter }}"
+        folder: "{{ fact_folder }}"
+        name: "{{ vmware_guest_name }}"
+        hardware:
+          num_cpus: 4
+          memory_mb: 6144
+      register: test_vm1_info
+      when:
+        - cpu_mem_configuration.instance.config.hardware.numCPU < 4
+        - cpu_mem_configuration.instance.config.hardware.memoryMB < 6144
+        #- cpu_mem_configuration.instance.config.hardware.memoryMB < 32768
+
+    - name: Mount ISO to VM
+      community.vmware.vmware_guest:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        datacenter: "{{ fact_datacenter }}"
+        folder: "{{ fact_folder }}"
+        name: "{{ vmware_guest_name }}"
+        cdrom:
+          - controller_number: 0
+            controller_type: sata
+            unit_number: 0
+            state: present
+            type: iso
+            iso_path: "{{ vmware_iso_path }}"
+      register: test_vm2_info
+
+    - name: Wait for the virtual machine to power on
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        state: powered-on
+        state_change_timeout: 200
+      delegate_to: localhost
+      register: deploy
+
+    - name: Wait for VMware tools to become available
+      community.vmware.vmware_guest_tools_wait:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        folder: "{{ fact_folder }}"
+        datacenter: "{{ fact_datacenter }}"
+      delegate_to: localhost
+      register: facts
+
+####### Begin - Disk clean up ##############################################################
+    - name: Run cleanmgr command
+      win_shell: |
+        Start-Process -FilePath cleanmgr.exe -ArgumentList "/autoclean" -WindowStyle Hidden -Wait
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+####### End - Disk clean up ##############################################################
+
+####### Begin - Upgrade the server to Windows 2025  ########################################
+    #- name: Run the update In Place Upgrade command - System will reboot
+    #  win_shell: |
+    #    $cdrom_letter = (Get-WmiObject Win32_CDROMDrive) | select Drive | Sort -Property Drive
+    #    $first_cdrom = ($cdrom_letter[0]).Drive
+    #    $upgrade_command = "${first_cdrom}\.\setup.exe /auto upgrade /quiet /imageindex 2 /DynamicUpdate Disable /Compat IgnoreWarning /eula accept"
+    #    Invoke-Expression $upgrade_command
+    #  delegate_to: "{{ server_dns_name }}"
+    #  vars:
+    #    ansible_shell_type: powershell
+    #  when: windows_os_version.stdout | length > 0
+
+    #- name: Wait 40 minutes for the In Place Upgrade command to complete
+    #  ansible.builtin.wait_for:
+    #    #timeout: 2400
+    #    timeout: 30
+    #  delegate_to: localhost
+    #  when: windows_os_version.stdout | length > 0
+
+    - name: Run the update In Place Upgrade command - System will reboot
+      win_shell: |
+        $cdrom_letter = (Get-WmiObject Win32_CDROMDrive) | select Drive | Sort -Property Drive
+        $first_cdrom = ($cdrom_letter[0]).Drive
+        Start-Process -FilePath ${first_cdrom}\setup.exe -ArgumentList "/auto upgrade /quiet /imageindex 2 /DynamicUpdate Disable /Compat IgnoreWarning /eula accept" -Wait
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+      when: windows_os_version.stdout | length > 0
+
+    - name: Wait for VMware tools to become available after In Place Upgrade
+      community.vmware.vmware_guest_tools_wait:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        folder: "{{ fact_folder }}"
+        datacenter: "{{ fact_datacenter }}"
+      delegate_to: localhost
+      register: facts
+      when: windows_os_version.stdout | length > 0
+####### End - Upgrade the server to Windows 2025  ########################################
+
+####### Begin - Set server to get updates from Microsoft Update ########################################
+    - name: Set the Window Update registry setting
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+        name: UseWUServer
+        data: 0
+        type: dword
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+
+    - name: Restart service wuauserv
+      ansible.windows.win_service:
+        name: wuauserv
+        state: restarted
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+
+    - name: Wait 1 minute
+      ansible.builtin.wait_for:
+        timeout: 60
+      delegate_to: localhost
+
+    - name: Reboot the machine with all defaults
+      ansible.windows.win_reboot:
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+
+    - name: Wait for VMware tools to become available
+      community.vmware.vmware_guest_tools_wait:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        folder: "{{ fact_folder }}"
+        datacenter: "{{ fact_datacenter }}"
+      delegate_to: localhost
+      register: facts
+####### End - Set server to get updates from Microsoft Update ########################################
+
+###### Begin - Install Patches ###################################################################
+    - name:  Install all updates and reboot - Round 1
+      ansible.windows.win_updates:
+        category_names: '*'
+        reboot: true
+      become: true
+      become_method: runas
+      become_user: SYSTEM
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+        ansible_ssh_args: -o ControlMaster=no -o ServerAliveInterval=30
+
+    - name: Wait 3 minute
+      ansible.builtin.wait_for:
+        timeout: 180
+      delegate_to: localhost
+
+    - name: Wait for VMware tools to become available
+      community.vmware.vmware_guest_tools_wait:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        folder: "{{ fact_folder }}"
+        datacenter: "{{ fact_datacenter }}"
+      delegate_to: localhost
+      register: facts
+
+    - name:  Install all updates and reboot - Round 2
+      ansible.windows.win_updates:
+        category_names: '*'
+        reboot: true
+      become: true
+      become_method: runas
+      become_user: SYSTEM
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+        ansible_ssh_args: -o ControlMaster=no -o ServerAliveInterval=30
+
+    - name: Wait 3 minute
+      ansible.builtin.wait_for:
+        timeout: 180
+      delegate_to: localhost
+
+    - name: Wait for VMware tools to become available
+      community.vmware.vmware_guest_tools_wait:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        folder: "{{ fact_folder }}"
+        datacenter: "{{ fact_datacenter }}"
+      delegate_to: localhost
+      register: facts
+###### End - Install Patches ###################################################################
+
+###### Begin - Restore original CPU/Memory configuration #######################################
+    - name: Get content of CPU_MEM.txt
+      ansible.windows.slurp:
+        src: 'C:\CPU_MEM.txt'
+      register: file_contents
+      delegate_to: "{{ server_dns_name }}"
+      vars:
+        ansible_shell_type: powershell
+
+    - name: Set CPU and Memory into variables
+      ansible.builtin.set_fact:
+        fact_cpu: "{{ (file_contents['content'] | b64decode | split('\n'))[0] }}"
+        fact_mem: "{{ (file_contents['content'] | b64decode | split('\n'))[1] }}"
+
+    - name: Wait for the virtual machine to shutdown
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        state: shutdown-guest
+        state_change_timeout: 200
+      delegate_to: localhost
+      register: deploy
+
+    - name: Restore orginal CPU/Memory configuration
+      community.vmware.vmware_guest:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        datacenter: "{{ fact_datacenter }}"
+        folder: "{{ fact_folder }}"
+        name: "{{ vmware_guest_name }}"
+        hardware:
+          num_cpus: "{{ fact_cpu }}"
+          memory_mb: "{{ fact_mem }}"
+
+    - name: Wait for the virtual machine to power on
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vmware_datacenter }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: false
+        name: "{{ vmware_guest_name }}"
+        state: powered-on
+        state_change_timeout: 200
+      delegate_to: localhost
+###### End - Restore original CPU/Memory configuration #######################################
