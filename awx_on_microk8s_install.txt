@@ -1,0 +1,87 @@
+# Set variables
+# Set namespace
+NAMESPACE="awx-namespace"
+# Get versions from https://github.com/ansible/awx-operator/releases
+AWXOPERATORVERSION=2.3.0
+# DNS hostname
+KUBERNETESHOSTDNSNAME=awx.example.com
+# Set Folder Name
+FOLDERNAME=awx_files
+
+# Setup Microk8s
+microk8s enable dns:1.1.1.1,9.9.9.9
+microk8s enable hostpath-storage
+microk8s enable ingress
+
+# Install Git, Make, Curl and Vim
+sudo apt-get install git make curl vim
+
+## Create folder
+mkdir $FOLDERNAME
+
+## Go to folder
+cd $FOLDERNAME
+
+## Install Kustomize binaries
+curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+
+## Create a cert
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout server.key -out server.crt -subj "/CN=$KUBERNETESHOSTDNSNAME/O=$KUBERNETESHOSTDNSNAME" -addext "subjectAltName = DNS:$KUBERNETESHOSTDNSNAME"
+
+## Create Namespace
+kubectl create namespace $NAMESPACE 
+
+## Add cert to namespace
+microk8s kubectl create secret tls awx-app-tls --namespace $NAMESPACE --key server.key --cert server.crt
+
+## Create awx file ##################################################################
+#####################################################################################
+echo "---
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: awx
+spec:
+  service_type: clusterip
+  ingress_type: ingress
+  ingress_tls_secret: awx-app-tls
+  hostname: $KUBERNETESHOSTDNSNAME" > awx.yml
+#####################################################################################
+#####################################################################################
+
+## Create awx kustomize file ########################################################
+#####################################################################################
+echo "---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # Find the latest tag here: https://github.com/ansible/awx-operator/releases
+  - github.com/ansible/awx-operator/config/default?ref=$AWXOPERATORVERSION
+  - awx.yml
+# Set the image tags to match the git version from above
+images:
+  - name: quay.io/ansible/awx-operator
+    newTag: $AWXOPERATORVERSION
+# Specify a custom namespace in which to install AWX
+namespace: $NAMESPACE" > kustomization.yml
+#####################################################################################
+#####################################################################################
+
+## Output Kustomize build to yaml file - Might have to run this twice
+./kustomize build . > awx_kustomize_apply.yml
+
+# Create the other awx pods - Might have to run this twice
+kubectl apply -f awx_kustomize_apply.yml
+
+# Check pod status
+kubectl get all -n $NAMESPACE
+
+## NOTE 2 #######
+# Wait about 5 minutes after the pods are running for the AWX website to build out.
+#########
+
+# check tls
+curl https://$KUBERNETESHOSTDNSNAME -kv
+
+# After the all the pods and services have been built run this command to get the admin password
+kubectl -n $NAMESPACE get secret awx-admin-password -o jsonpath="{.data.password}" | base64 --decode
