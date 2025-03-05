@@ -1,0 +1,38 @@
+## Update the server
+sudo apt update
+sudo apt upgrade
+sudo apt dist-upgrade
+
+## Install Microk8s via snap
+sudo apt install snapd
+sudo snap install microk8s --classic
+
+## Setup the Microk8s to Kubectl alias
+sudo snap alias microk8s.kubectl kubectl
+
+## Add a user to Microk8s group for proper permissions
+sudo usermod -a -G microk8s <username_here>
+sudo chown -f -R <username_here> ~/.kube
+newgrp microk8s
+
+# Setup Microk8s
+microk8s enable dns:1.1.1.1,9.9.9.9
+microk8s enable hostpath-storage
+microk8s enable ingress
+
+# Install Vim to make editing the files easier
+sudo apt-get install vim
+
+# Install Firewall
+sudo apt-get install ufw
+sudo ufw allow from 192.168.0.0/24 to any port ssh proto tcp
+sudo ufw enable
+
+# Post Intall - Inspect install for warnings
+sudo microk8s inspect
+
+# Enable Auto Complete
+echo "source <(kubectl completion bash)" >> ~/.bashrc
+
+# Reboot the server
+sudo reboot
